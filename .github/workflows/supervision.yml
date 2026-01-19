@@ -1,0 +1,38 @@
+name: Auditoria Automática de Drive
+
+on:
+  schedule:
+    # Se ejecuta todos los días a las 13:00 UTC 
+    # (Como Perú es UTC-5, esto serán las 08:00 AM hora Perú)
+    - cron: '0 13 * * *'
+  
+  # Esto permite que aparezca un botón para ejecutarlo manualmente cuando quieras probar
+  workflow_dispatch:
+
+jobs:
+  run-audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar el código del repositorio
+        uses: actions/checkout@v3
+
+      - name: Instalar Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Instalar librerías necesarias
+        run: |
+          pip install google-api-python-client google-auth
+
+      - name: Crear archivo de credenciales desde el Secreto
+        # Este paso "crea" el archivo credentials.json temporalmente para que el script lo lea
+        run: |
+          echo '${{ secrets.DRIVE_CREDENTIALS_JSON }}' > credentials.json
+
+      - name: Ejecutar el script
+        env:
+          # Aquí pasamos la contraseña al script de Python
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+        run: python auto_drive.py
