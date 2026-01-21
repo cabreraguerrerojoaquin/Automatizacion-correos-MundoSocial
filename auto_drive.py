@@ -18,8 +18,8 @@ SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets'
 ]
 
-FOLDER_INBOX_ID = os.environ.get('DRIVE_INBOX_ID')
-FOLDER_PROCESSED_ID = os.environ.get('DRIVE_PROCESSED_ID')
+FOLDER_INBOX_ID = os.environ.get('INPUT_ID')
+FOLDER_PROCESSED_ID = os.environ.get('OUTPUT_ID')
 SHEET_ID = os.environ.get('SHEET_ID')
 SMTP_USER = os.environ.get('GMAIL_USER')
 SMTP_PASS = os.environ.get('GMAIL_PASS')
