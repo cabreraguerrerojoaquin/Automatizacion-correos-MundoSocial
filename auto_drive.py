@@ -22,7 +22,7 @@ FOLDER_INBOX_ID = os.environ.get('INPUT_ID')
 FOLDER_PROCESSED_ID = os.environ.get('OUTPUT_ID')
 SHEET_ID = os.environ.get('SHEET_ID')
 SMTP_USER = os.environ.get('GMAIL_USER')
-SMTP_PASS = os.environ.get('GMAIL_PASS')
+SMTP_PASS = os.environ.get('GMAIL_PASSWORD')
 
 # Autenticación
 creds_json = json.loads(os.environ.get('GCP_SA_KEY'))
