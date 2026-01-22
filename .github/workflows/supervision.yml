@@ -1,20 +1,20 @@
-name: Auditoria Automática de Drive
+name: Control Automático de Entregas
 
 on:
   schedule:
-    # Se ejecuta todos los días a las 13:00 UTC 
-    # (Como Perú es UTC-5, esto serán las 08:00 AM hora Perú)
-    - cron: '0 13 * * *'
   
-  # Esto permite que aparezca un botón para ejecutarlo manualmente cuando quieras probar
+    - cron: '*/30 * * * *'
+  
+    - cron: '0 5 * * 0'
+
   workflow_dispatch:
 
 jobs:
-  run-audit:
+  ejecutar_bot:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Descargar el código del repositorio
+      - name: Descargar código
         uses: actions/checkout@v3
 
       - name: Instalar Python
@@ -22,17 +22,30 @@ jobs:
         with:
           python-version: '3.9'
 
-      - name: Instalar librerías necesarias
-        run: |
-          pip install google-api-python-client google-auth
+      - name: Instalar librerías
+        run: pip install google-api-python-client google-auth gspread oauth2client
 
-      - name: Crear archivo de credenciales desde el Secreto
-        # Este paso "crea" el archivo credentials.json temporalmente para que el script lo lea
-        run: |
-          echo '${{ secrets.DRIVE_CREDENTIALS_JSON }}' > credentials.json
-
-      - name: Ejecutar el script
+      - name: Ejecutar Script (Verificación o Reporte)
         env:
-          # Aquí pasamos la contraseña al script de Python
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PASS: ${{ secrets.GMAIL_PASS }}
+          DRIVE_INBOX_ID: ${{ secrets.DRIVE_INBOX_ID }}
+          DRIVE_PROCESSED_ID: ${{ secrets.DRIVE_PROCESSED_ID }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+        run: |
+          # Obtenemos la hora actual (UTC) para saber si toca reporte
+          # Domingo (0) a las 05 am UTC es el momento del reporte
+          DAY_OF_WEEK=$(date +%u)
+          HOUR=$(date +%H)
+          
+          if [ "$DAY_OF_WEEK" -eq 7 ] && [ "$HOUR" -eq 05 ]; then
+             echo "📆 Es Sábado medianoche (Perú). Ejecutando Reporte Semanal..."
+             python main.py --modo reporte
+          else
+             echo "🔍 Ejecución rutinaria. Buscando archivos nuevos..."
+             python main.py --modo verificar
+          fi
+        env:
           GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
         run: python auto_drive.py
