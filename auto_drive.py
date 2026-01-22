@@ -1,229 +1,286 @@
 import os
+import json
 import smtplib
 import datetime
-import json
+import time
+import random
+import sys
+import argparse
+import logging
+import io
+import gspread
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
-import gspread
-import io
 
-# --- CONFIGURACIÓN ---
-SCOPES = [
-    'https://www.googleapis.com/auth/drive',
-    'https://www.googleapis.com/auth/spreadsheets'
-]
+# ==========================================
+# 0. CONFIGURACIÓN DE LOGS ESTRUCTURADOS
+# ==========================================
+# Esto configura cómo se verán los mensajes en la consola de GitHub Actions
+logging.basicConfig(
+    level=logging.INFO, # Solo mostrar INFO, WARNING y ERROR (Ocultar DEBUG)
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%H:%M:%S', # Formato de hora limpio
+    handlers=[
+        logging.StreamHandler(sys.stdout) # Asegura que salga en la consola de GitHub
+    ]
+)
+logger = logging.getLogger()
 
-FOLDER_INBOX_ID = os.environ.get('INPUT_ID')
-FOLDER_PROCESSED_ID = os.environ.get('OUTPUT_ID')
-SHEET_ID = os.environ.get('SHEET_ID')
-SMTP_USER = os.environ.get('GMAIL_USER')
-SMTP_PASS = os.environ.get('GMAIL_PASSWORD')
+# ==========================================
+# 1. CARGA DE VARIABLES
+# ==========================================
+def get_env_var(name):
+    val = os.environ.get(name)
+    if not val:
+        logger.critical(f"Error Crítico: La variable de entorno '{name}' no existe.")
+        sys.exit(1) # Detener ejecución con código de error
+    return val
 
-# Autenticación
-creds_json = json.loads(os.environ.get('GCP_SA_KEY'))
-creds = Credentials.from_service_account_info(creds_json, scopes=SCOPES)
-drive_service = build('drive', 'v3', credentials=creds)
-gc = gspread.authorize(creds)
+logger.info("---INICIANDO CONFIGURACIÓN ---")
 
-def enviar_correo(destinatarios, asunto, cuerpo, archivo_adjunto=None, nombre_archivo=None):
-    """
-    Envía correos a uno o varios destinatarios.
-    Acepta 'destinatarios' como string (uno solo) o list (varios).
-    """
+try:
+    FOLDER_INBOX_ID = get_env_var('DRIVE_INBOX_ID')
+    FOLDER_PROCESSED_ID = get_env_var('DRIVE_PROCESSED_ID')
+    SHEET_ID = get_env_var('SHEET_ID')
+    GMAIL_USER = get_env_var('GMAIL_USER')
+    GMAIL_PASS = get_env_var('GMAIL_PASS')
+    GCP_KEY_JSON = json.loads(get_env_var('GCP_SA_KEY'))
+    logger.info("Variables de entorno cargadas correctamente.")
+except Exception as e:
+    logger.critical(f"Error cargando configuración: {e}")
+    sys.exit(1)
+
+# CORREOS DE AUTORIDADES
+EMAIL_RRHH = ["recursoshumanos@ejemplo.com"] 
+EMAIL_DIRECTIVA = ["presidente@ejemplo.com", "secretario@ejemplo.com"]
+
+# ==========================================
+# 2. CONEXIÓN GOOGLE
+# ==========================================
+SCOPES = ['https://www.googleapis.com/auth/drive', 'https://www.googleapis.com/auth/spreadsheets']
+
+try:
+    creds = Credentials.from_service_account_info(GCP_KEY_JSON, scopes=SCOPES)
+    drive_service = build('drive', 'v3', credentials=creds)
+    gc = gspread.authorize(creds)
+    logger.info("Conexión con Google API establecida.")
+except Exception as e:
+    logger.critical(f"Fallo en conexión con Google: {e}")
+    sys.exit(1)
+
+# ==========================================
+# 3. UTILIDADES
+# ==========================================
+def obtener_hora_peru():
+    """Hora UTC -5"""
+    hora_utc = datetime.datetime.utcnow()
+    hora_peru = hora_utc - datetime.timedelta(hours=5)
+    return hora_peru.strftime("%Y-%m-%d %H:%M:%S (Hora Perú)")
+
+def enviar_correo_individual(destinatario, asunto, cuerpo, archivo_memoria=None, nombre_archivo=None):
     try:
         msg = MIMEMultipart()
-        msg['From'] = SMTP_USER
+        msg['From'] = GMAIL_USER
+        msg['To'] = destinatario
         msg['Subject'] = asunto
         msg.attach(MIMEText(cuerpo, 'plain'))
 
-        # Manejo de lista de correos
-        if isinstance(destinatarios, list):
-            msg['To'] = ", ".join(destinatarios)
-            lista_envio = destinatarios
-        else:
-            msg['To'] = destinatarios
-            lista_envio = [destinatarios]
-
-        # Adjuntar archivo si existe
-        if archivo_adjunto:
+        if archivo_memoria:
             part = MIMEBase('application', 'octet-stream')
-            part.set_payload(archivo_adjunto.read())
+            part.set_payload(archivo_memoria.read())
             encoders.encode_base64(part)
             part.add_header('Content-Disposition', f'attachment; filename="{nombre_archivo}"')
             msg.attach(part)
-            # Resetear el puntero del archivo por si se necesitara reusar (buena práctica)
-            archivo_adjunto.seek(0)
+            archivo_memoria.seek(0)
 
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
-        server.login(SMTP_USER, SMTP_PASS)
-        
-        # Enviar a la lista
-        server.sendmail(SMTP_USER, lista_envio, msg.as_string())
+        server.login(GMAIL_USER, GMAIL_PASS)
+        server.sendmail(GMAIL_USER, destinatario, msg.as_string())
         server.quit()
-        print(f"📧 Correo enviado a: {msg['To']}")
-        
+        logger.info(f"Enviado correctamente a: {destinatario}")
+        return True
     except Exception as e:
-        print(f"❌ Error enviando correo: {e}")
-
-def descargar_archivo(file_id):
-    request = drive_service.files().get_media(fileId=file_id)
-    fh = io.BytesIO()
-    downloader = MediaIoBaseDownload(fh, request)
-    done = False
-    while done is False:
-        status, done = downloader.next_chunk()
-    fh.seek(0)
-    return fh
+        logger.error(f"Error envío a {destinatario}: {e}")
+        return False
 
 def mover_archivo(file_id):
     try:
         file = drive_service.files().get(fileId=file_id, fields='parents').execute()
         prev_parents = ",".join(file.get('parents'))
-        drive_service.files().update(
-            fileId=file_id,
-            addParents=FOLDER_PROCESSED_ID,
-            removeParents=prev_parents,
-            fields='id, parents'
-        ).execute()
-        print(f"🚚 Archivo {file_id} procesado y movido.")
+        drive_service.files().update(fileId=file_id, addParents=FOLDER_PROCESSED_ID, removeParents=prev_parents).execute()
+        logger.info(f"Archivo movido a carpeta Procesados.")
+    except Exception as e: 
+        logger.warning(f"No se pudo mover el archivo: {e}")
+
+def descargar_archivo_ram(file_id):
+    try:
+        request = drive_service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while done is False: status, done = downloader.next_chunk()
+        fh.seek(0)
+        return fh
     except Exception as e:
-        print(f"⚠️ Error moviendo archivo: {e}")
+        logger.error(f"Error descargando archivo: {e}")
+        return None
 
-def procesar_nuevas_entregas(sheet):
-    print("--- 🔍 Buscando entregas nuevas ---")
+# ==========================================
+# 4. LÓGICA DE NEGOCIO
+# ==========================================
+
+def procesar_nuevas_entregas():
+    logger.info("--- MODO: VERIFICACIÓN DE ENTREGAS ---")
     
-    results = drive_service.files().list(
-        q=f"'{FOLDER_INBOX_ID}' in parents and trashed=false and mimeType != 'application/vnd.google-apps.folder'",
-        fields="files(id, name, owners(emailAddress))"
-    ).execute()
-    items = results.get('files', [])
-
-    if not items:
-        print("✅ No hay archivos pendientes.")
+    try:
+        results = drive_service.files().list(
+            q=f"'{FOLDER_INBOX_ID}' in parents and trashed=false and mimeType != 'application/vnd.google-apps.folder'",
+            fields="files(id, name, owners(emailAddress))"
+        ).execute()
+        items = results.get('files', [])
+    except Exception as e:
+        logger.error(f"Error consultando Drive: {e}")
         return
 
-    records = sheet.get_all_records()
+    if not items:
+        logger.info("No se encontraron archivos nuevos. Finalizando.")
+        return
+
+    logger.info(f"Se encontraron {len(items)} archivos nuevos.")
     
+    # Cargar BD
+    try:
+        sh = gc.open_by_key(SHEET_ID)
+        worksheet = sh.sheet1
+        records = worksheet.get_all_records()
+    except Exception as e:
+        logger.critical(f"Error leyendo Excel: {e}")
+        return
+
     for item in items:
         file_id = item['id']
         file_name = item['name']
-        try:
-            owner_email = item['owners'][0]['emailAddress']
-        except:
+        try: owner_email = item['owners'][0]['emailAddress']
+        except: 
+            logger.warning(f"Archivo {file_name} sin dueño identificable.")
             continue
 
-        print(f"📂 Procesando entrega de: {owner_email}")
+        logger.info(f"Procesando archivo: {file_name} (De: {owner_email})")
 
-        # Buscar quién subió el archivo
-        uploader_data = None
-        uploader_row = None
+        grupo_identificado = None
+        nombre_subidor = "Desconocido"
         
-        for i, record in enumerate(records):
-            if record['Email Integrante'] == owner_email:
-                uploader_row = i + 2
-                uploader_data = record
+        # Identificar usuario
+        for r in records:
+            if r.get('Email Integrante') == owner_email:
+                grupo_identificado = str(r.get('Grupo'))
+                nombre_subidor = r.get('Nombre Integrante')
                 break
         
-        if uploader_data:
-            # 1. Actualizar BD
-            fecha_hoy = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            sheet.update_cell(uploader_row, 5, "Entregado") 
-            sheet.update_cell(uploader_row, 6, fecha_hoy)
-            print(f"✅ Estado actualizado para {uploader_data['Nombre Integrante']}")
-
-            # 2. Descargar archivo
-            archivo_memoria = descargar_archivo(file_id)
-
-            # --- NUEVA LÓGICA DE GRUPO ---
-            grupo_id = uploader_data['Grupo']
+        if grupo_identificado:
+            logger.info(f"Grupo detectado: {grupo_identificado}")
+            fecha_hora_peru = obtener_hora_peru()
+            emails_grupo = []
             
-            # Filtramos a TODOS los miembros de este grupo
-            # Buscamos en 'records' todos los que tengan el mismo Grupo
-            emails_grupo = [r['Email Integrante'] for r in records if r['Grupo'] == grupo_id and r['Email Integrante']]
+            # Actualizar Excel
+            for i, r in enumerate(records):
+                if str(r.get('Grupo')) == grupo_identificado:
+                    if r.get('Email Integrante'):
+                        emails_grupo.append(r['Email Integrante'])
+                    
+                    if r.get('Estado') != "Entregado":
+                        try:
+                            worksheet.update_cell(i + 2, 4, "Entregado")
+                            worksheet.update_cell(i + 2, 5, fecha_hora_peru)
+                            logger.info(f"Excel actualizado para: {r.get('Nombre Integrante')}")
+                            time.sleep(1.5) 
+                        except Exception as e:
+                            logger.error(f"Error escribiendo en Excel: {e}")
             
-            # Eliminamos duplicados por seguridad
-            emails_grupo = list(set(emails_grupo))
+            # Preparar destinatarios
+            destinatarios = emails_grupo + EMAIL_DIRECTIVA
+            destinatarios = list(set([d.strip() for d in destinatarios if d and "@" in d]))
             
-            print(f"👥 Notificando al grupo {grupo_id}: {emails_grupo}")
+            archivo_ram = descargar_archivo_ram(file_id)
+            if not archivo_ram: continue # Si falló descarga, saltar
 
-            # 3. Enviar correo a TODO EL GRUPO
-            asunto = f"Entrega Exitosa - Grupo {grupo_id}"
-            cuerpo = (
-                f"Hola equipo,\n\n"
-                f"El integrante {uploader_data['Nombre Integrante']} ha subido un nuevo avance.\n"
-                f"Archivo: {file_name}\n"
-                f"Fecha: {fecha_hoy}\n\n"
-                f"Adjuntamos copia del archivo para su revisión.\n"
-            )
-            
-            # Enviamos un solo correo con copia a todos
-            enviar_correo(emails_grupo, asunto, cuerpo, archivo_memoria, file_name)
+            asunto = f"Entrega Exitosa - Grupo {grupo_identificado}"
+            cuerpo = (f"Se confirma recepción del archivo de {nombre_subidor}.\n"
+                      f"Grupo: {grupo_identificado}\n"
+                      f"Fecha: {fecha_hora_peru}\n\n"
+                      f"Copia automática a Junta Directiva.")
 
-            # 4. Mover archivo
-            mover_archivo(file_id)
+            logger.info(f"Iniciando envíos a {len(destinatarios)} personas...")
+            enviado_al_menos_uno = False
+            for dest in destinatarios:
+                pausa = random.randint(5, 10)
+                time.sleep(pausa) 
+                if enviar_correo_individual(dest, asunto, cuerpo, archivo_ram, file_name):
+                    enviado_al_menos_uno = True
+
+            if enviado_al_menos_uno:
+                mover_archivo(file_id)
+            else:
+                logger.error("Fallaron todos los envíos de correo. No se mueve el archivo.")
         else:
-            print(f"⚠️ Correo no registrado: {owner_email}")
+            logger.warning(f"Correo {owner_email} no encontrado en la base de datos.")
 
-def reporte_semanal(sheet):
-    """
-    Reporte de Sábado. 
-    Ahora notifica a todo el grupo si cumplieron o no.
-    """
-    print("--- 📊 Generando Reporte Semanal ---")
-    records = sheet.get_all_records()
-    
-    grupos_status = {} # Diccionario para agrupar estados por grupo
+def reporte_semanal_pendientes():
+    logger.info("--- MODO: REPORTE SEMANAL (SÁBADO) ---")
+    try:
+        sh = gc.open_by_key(SHEET_ID)
+        records = sh.sheet1.get_all_records()
+    except Exception as e:
+        logger.critical(f"Error acceso Excel: {e}")
+        return
 
-    # Analizar estados
+    grupos_pendientes = {}
+
     for r in records:
-        grupo = r['Grupo']
-        email = r['Email Integrante']
-        
-        if grupo not in grupos_status:
-            grupos_status[grupo] = {'emails': [], 'entregado': False}
-        
-        grupos_status[grupo]['emails'].append(email)
-        
-        # Si AL MENOS UNO del grupo entregó, consideramos al grupo como cumplido
-        # (Puedes cambiar esta lógica si TODOS deben entregar)
-        if r['Estado'] == 'Entregado':
-            grupos_status[grupo]['entregado'] = True
+        if str(r.get('Estado')).strip().lower() != "entregado":
+            grupo = str(r.get('Grupo'))
+            if grupo not in grupos_pendientes: grupos_pendientes[grupo] = []
+            if r.get('Email Integrante'): grupos_pendientes[grupo].append(r['Email Integrante'])
 
-    # Enviar reportes
-    cuerpo_rrhh = "Resumen Semanal:\n"
+    if not grupos_pendientes:
+        logger.info("Todos han cumplido esta semana. No hay reportes.")
+        return
+
+    logger.info(f" Detectados {len(grupos_pendientes)} grupos pendientes.")
+    hora = obtener_hora_peru()
+
+    for grupo, miembros in grupos_pendientes.items():
+        destinatarios = miembros + EMAIL_RRHH + EMAIL_DIRECTIVA
+        destinatarios = list(set([d.strip() for d in destinatarios if d and "@" in d]))
+        
+        asunto = f"ALERTA INCUMPLIMIENTO - Grupo {grupo}"
+        cuerpo = f"Atención Grupo {grupo}: No se registró entrega al cierre de semana ({hora}).\nCopia a Directiva/RRHH."
+
+        logger.info(f"Notificando Grupo {grupo} ({len(destinatarios)} destinatarios)...")
+        for dest in destinatarios:
+            time.sleep(random.randint(5, 10))
+            enviar_correo_individual(dest, asunto, cuerpo)
+
+# ==========================================
+# 5. PUNTO DE ENTRADA
+# ==========================================
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--modo", choices=["verificar", "reporte"], required=True, help="Modo de ejecución")
+    args = parser.parse_args()
+
+    start_time = time.time()
     
-    for grupo, datos in grupos_status.items():
-        emails = datos['emails']
-        
-        if datos['entregado']:
-            # Grupo Cumplido
-            enviar_correo(emails, "Reporte Semanal: ✅ Objetivo Cumplido", 
-                          f"Felicidades Grupo {grupo}, hemos registrado su avance esta semana.")
-            cuerpo_rrhh += f"- Grupo {grupo}: CUMPLIÓ\n"
-        else:
-            # Grupo Incumplido
-            enviar_correo(emails, "Reporte Semanal: ❌ Falta Entrega", 
-                          f"Estimado Grupo {grupo}, no se registró ninguna entrega esta semana. Por favor regularizar.")
-            cuerpo_rrhh += f"- Grupo {grupo}: NO ENTREGÓ\n"
-
-    # Reporte a RRHH
-    enviar_correo("recursoshumanos@gmail.com", "Informe de Avances Semanal", cuerpo_rrhh)
-    print("✅ Reporte semanal finalizado.")
-
-def main():
-    sh = gc.open_by_key(SHEET_ID)
-    worksheet = sh.sheet1
+    if args.modo == "verificar":
+        procesar_nuevas_entregas()
+    elif args.modo == "reporte":
+        reporte_semanal_pendientes()
     
-    procesar_nuevas_entregas(worksheet)
-
-    if datetime.datetime.today().weekday() == 5:
-        reporte_semanal(worksheet)
-
-if __name__ == '__main__':
-    main()
+    duration = time.time() - start_time
+    logger.info(f"🏁 Ejecución finalizada en {duration:.2f} segundos.")
