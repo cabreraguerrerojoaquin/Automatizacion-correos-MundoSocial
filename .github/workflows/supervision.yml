@@ -2,11 +2,15 @@ name: Control Automático de Entregas
 
 on:
   schedule:
-  
+    # 1. VERIFICACIÓN RUTINARIA: Se ejecuta cada 30 minutos
+    # Busca archivos nuevos en la carpeta Inbox
     - cron: '*/30 * * * *'
-  
+    
+    # 2. REPORTE SEMANAL: Se ejecuta a las 05:00 UTC del Domingo
+    # (Esto equivale exactamente a las 00:00 del Domingo en Perú / Medianoche del Sábado)
     - cron: '0 5 * * 0'
 
+  # Permite ejecutar manualmente el flujo desde la pestaña "Actions" de GitHub para pruebas
   workflow_dispatch:
 
 jobs:
@@ -14,19 +18,26 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Descargar código
+      # Paso 1: Descargar tu código (auto_drive.py) al entorno virtual
+      - name: Descargar código del repositorio
         uses: actions/checkout@v3
 
-      - name: Instalar Python
+      # Paso 2: Instalar Python
+      - name: Configurar Python 3.9
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
 
-      - name: Instalar librerías
-        run: pip install google-api-python-client google-auth gspread oauth2client
+      # Paso 3: Instalar las dependencias que usa tu script
+      - name: Instalar librerías necesarias
+        run: |
+          python -m pip install --upgrade pip
+          pip install google-api-python-client google-auth gspread oauth2client
 
-      - name: Ejecutar Script (Verificación o Reporte)
+      # Paso 4: Ejecutar la lógica principal
+      - name: Ejecutar Script (Decidir si es Verificación o Reporte)
         env:
+          # Mapeo de tus Secrets de GitHub a las variables de entorno que lee Python
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_PASS: ${{ secrets.GMAIL_PASS }}
@@ -34,18 +45,21 @@ jobs:
           DRIVE_PROCESSED_ID: ${{ secrets.DRIVE_PROCESSED_ID }}
           SHEET_ID: ${{ secrets.SHEET_ID }}
         run: |
-          # Obtenemos la hora actual (UTC) para saber si toca reporte
-          # Domingo (0) a las 05 am UTC es el momento del reporte
+          # Obtenemos la fecha y hora actual del servidor (siempre es UTC)
+          # %u = Día de la semana (1=Lunes ... 7=Domingo)
+          # %H = Hora actual formato 24h (00..23)
           DAY_OF_WEEK=$(date +%u)
           HOUR=$(date +%H)
           
+          echo "🕒 Diagnóstico de hora UTC: $HOUR:00 - Día de semana: $DAY_OF_WEEK"
+
+          # LÓGICA DE DECISIÓN:
+          # Si es Domingo (7) Y son las 05:00 AM UTC (Medianoche Perú), ejecutamos reporte.
+          # Nota: Usamos -eq 05 (o 5) para capturar la hora del cron.
           if [ "$DAY_OF_WEEK" -eq 7 ] && [ "$HOUR" -eq 05 ]; then
-             echo "📆 Es Sábado medianoche (Perú). Ejecutando Reporte Semanal..."
-             python main.py --modo reporte
+             echo "📆 Es el horario del Reporte Semanal. Ejecutando modo reporte..."
+             python auto_drive.py --modo reporte
           else
-             echo "🔍 Ejecución rutinaria. Buscando archivos nuevos..."
-             python main.py --modo verificar
+             echo "🔍 Es horario de rutina. Buscando archivos nuevos..."
+             python auto_drive.py --modo verificar
           fi
-        env:
-          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
-        run: python auto_drive.py
